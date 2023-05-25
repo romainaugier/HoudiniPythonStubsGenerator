@@ -23,4 +23,4 @@ You can also use the `gen.bat` script but the python major and minor version mus
 .\gen.bat /path/to/houdini/dir/Houdini 19.5.435
 ```
 
-And used in your favorite editor by making the autocomplete path pointing to the `/stubs` directory.
+Then you can use in your favorite editor by making the autocomplete path pointing to the `/stubs` directory.
