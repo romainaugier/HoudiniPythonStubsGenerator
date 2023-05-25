@@ -5,6 +5,7 @@ import os
 import importlib
 import sys
 import optparse
+import types
 import io
 import re
 
@@ -31,6 +32,8 @@ class TypePattern():
 
 TYPES_PATTERN_DECL = [
     TypePattern(r"(HOM_)?IterableList< (HOM_IterableList|std::vector)< (HOM_ElemPtr< |HOM_|UT_)?([A-Za-z0-9_]+)( >)?( \*)?.*", r"typing.List[typing.List[\g<4>]]"),
+    TypePattern(r"std::pair< (HOM_|UT_)?([a-zA-Z0-9_:]+),std::vector< (HOM_|UT_)?([a-zA-Z0-9_:]+),.*", r"typing.Tuple[\g<2>, typing.List[\g<4>]]"),
+    TypePattern(r"UT_Tuple< (HOM_|UT_)?([a-zA-Z0-9_]+),std::vector.*", r"typing.Tuple[\g<2>, typing.List[typing.Any]]"),
     TypePattern(r"std::vector< std::map< .+ >", r"typing.List[typing.Dict]"),
     TypePattern(r"std::map< .+ >", r"typing.Dict"),
     TypePattern(r"std::vector< std::pair< .+ >", r"typing.List[typing.Any]"),
@@ -40,7 +43,7 @@ TYPES_PATTERN_DECL = [
     TypePattern(r"(HOM_)?IterableList< (HOM_ElemPtr< |HOM_|UT_)?([A-Za-z0-9_]+)( >)?( \*)?", r"typing.List[\g<3>]"),
     TypePattern(r"UT_SharedPtr< (HOM_|UT_)?([a-zA-Z0-9_]+) >", r"\g<2>"),
     TypePattern(r"HOM_PtrOrNull< (HOM_|UT_)?([a-zA-Z0-9_]+) ?>", r"\g<2>"),
-    TypePattern(r"std::pair< (HOM_|UT_)?([a-zA-Z0-9_]+),.*", r"typing.Tuple[\g<2>, \g<2>]"),
+    TypePattern(r"std::pair< (HOM_|UT_)?([a-zA-Z0-9_:]+),.*", r"typing.Tuple[\g<2>, \g<2>]"),
     TypePattern(r"std::pair< (HOM_ElemPtr< |UT_|HOM_)?([a-zA-Z0-9_]+)( >)?,(HOM_ElemPtr< |UT_|HOM_)?([a-zA-Z0-9_]+)( >)?.*", r"typing.Tuple[\g<2>, \g<5>]"),
     TypePattern(r"(HOM|UT)?_Tuple< (HOM_|UT_|HOM_ElemPtr< )?([A-Za-z0-9_,]+.*)", r"typing.Tuple"),
     TypePattern(r"(HOM|UT)?_Tuple< ([A-Za-z0-9_,]+) >", r"typing.Tuple[\g<2>]"),
@@ -122,44 +125,43 @@ def get_enumeration(doc: str,
 
     return list(set(values))
 
-if __name__ == "__main__":
-    print("Generating stubs for HOM")
-
-    try:
-        import hou
-
-        module = hou
-
-        print("hou module has been imported, using it to generate the stubs")
-    except ImportError:
-        print("Cannot import hou, trying to find it with the provided path")
+def generate_stubs(hou) -> None:
+    if not hou.isUIAvailable():
+        print("hou.ui is not available, cannot generate stubs for ui class")
     
-        parser = optparse.OptionParser()
-        parser.add_option("--path-to-hou",
-                        dest="hou_path",
-                        default=None,
-                        help="Path to hou.py file")
-        
-        options, args = parser.parse_args()
-        hou_path = options.hou_path
-        
-        if hou_path is None:
-            print("No path has been provided to find hou.py, exiting")
-            sys.exit(1)
-
-        if not os.path.exists(hou_path):
-            print("Path provided to find hou.py does not exist, exiting")
-            sys.exit(1)
-
-        hou_name, _ = os.path.splitext(os.path.basename(hou_path))
-        hou_dir = os.path.dirname(hou_path)
-
-        sys.path.append(hou_dir)
-
-        module = importlib.import_module(hou_name)
+    module = hou
 
     classes = inspect.getmembers(module, inspect.isclass)
     functions = inspect.getmembers(module, inspect.isfunction)
+    modules = inspect.getmembers(module, inspect.ismodule)
+
+    classes = sorted(classes, key=lambda c: inspect.getsourcelines(c[1])[1])
+    functions = sorted(functions, key=lambda c: inspect.getsourcelines(c[1])[1])
+    
+    classes_names = [c[0] for c in classes]
+    functions_names = [f[0] for f in functions]
+    modules_names = [m[0] for m in modules]
+
+    others = list()
+    
+    for obj in dir(hou):
+        if (not obj in classes_names and 
+            not obj in functions_names and
+            not obj in modules_names and
+            not obj.startswith(("__", "_"))):
+            if hasattr(hou, obj):
+                others.append((obj, getattr(hou, obj)))
+            
+    for other in others:
+        if callable(other[1]):
+            functions.append(other)
+            continue
+
+        members = inspect.getmembers(other[1])
+
+        if len(members) > 0:
+            classes.append(other)
+            continue
 
     output = io.StringIO()
     output.write("# Houdini stubs\n")
@@ -170,7 +172,6 @@ if __name__ == "__main__":
     output.write("\n")
     output.write("\n")
 
-    classes = sorted(classes, key=lambda c: inspect.getsourcelines(c[1])[1])
 
     for _class in classes:
         class_name = _class[0]
@@ -179,10 +180,12 @@ if __name__ == "__main__":
         if class_name.startswith("_"):
             continue
 
-        class_mro = inspect.getmro(_class)
+        try:
+            class_mro = inspect.getmro(_class)
 
-        class_parent = class_mro[1].__name__.replace("hou.", "") if len(class_mro) > 1 else "object"
-        class_sig = inspect.signature(_class)
+            class_parent = class_mro[1].__name__.replace("hou.", "") if len(class_mro) > 1 else "object"
+        except AttributeError:
+            class_parent = "object"
 
         class_doc = _class.__doc__
         
@@ -210,6 +213,19 @@ if __name__ == "__main__":
 
         class_methods = inspect.getmembers(_class, inspect.isfunction)
 
+        class_methods_names = [f[0] for f in class_methods]
+        
+        others = list()
+        
+        for obj in dir(_class):
+            if not obj in class_methods_names:
+                if hasattr(_class, obj):
+                    others.append((obj, getattr(_class, obj)))
+        
+        for other in others:
+            if callable(other[1]):
+                class_methods.append(other)
+
         for method in class_methods:
             method_name = method[0]
             _method = method[1]
@@ -217,7 +233,11 @@ if __name__ == "__main__":
             if method_name.startswith("_") and not "__init__" in method_name:
                 continue
 
-            method_sig = inspect.signature(_method)        
+            try:
+                method_sig = inspect.signature(_method)        
+            except ValueError:
+                print(f"Cannot find signature for function \"{method_name}\", skipping it")
+                
             method_doc = _method.__doc__
 
             if method_doc is None:
@@ -250,13 +270,15 @@ if __name__ == "__main__":
             output.write(f"        pass\n")
             output.write("\n")
 
-    functions = sorted(functions, key=lambda c: inspect.getsourcelines(c[1])[1])
-
     for function in functions:
         function_name = function[0]
         _function = function[1]
 
-        function_sig = inspect.signature(_function)        
+        try:
+            function_sig = inspect.signature(_function)        
+        except ValueError:
+            print(f"Cannot find signature of function \"{function_name}\", skipping it")
+
         function_doc = _function.__doc__
 
         if function_doc is None:
@@ -289,9 +311,46 @@ if __name__ == "__main__":
         output.write(f"    pass\n")
         output.write("\n")
 
-    os.makedirs("stubs", exist_ok=True)    
+    stubs_file_path = "{0}/stubs/hou.py".format(os.path.dirname(__file__))
     
-    with open("stubs/hou.py", "w") as file:
+    os.makedirs(os.path.dirname(stubs_file_path), exist_ok=True)
+    
+    with open(stubs_file_path, "w") as file:
         file.write(output.getvalue())
 
+    print(f"Stubs have been written to {stubs_file_path}")
+
+if __name__ == "__main__":
+    print("Generating stubs for HOM")
+
+    if "hython" in sys.executable:
+        print("Hython detected")
+        import hou
+        generate_stubs(hou)
+
+        sys.exit(0)
+
+    if sys.version_info.major != 3:
+        print("Stubs generator does not work with python 2 !")
+        sys.exit(1)
+
+    if hasattr(sys, "setdlopenflags"):
+        old_dlopen_flags = sys.getdlopenflags()
+        sys.setdlopenflags(old_dlopen_flags | os.RTLD_GLOBAL)
+        
+    if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+        os.add_dll_directory("{}/bin".format(os.environ["HFS"]))
+
+    try:
+        import hou
+    except ImportError:
+        sys.path.append(os.environ["HHP"])
+
+        import hou
+    finally:
+        if hasattr(sys, "setdlopenflags"):
+            sys.setdlopenflags(old_dlopen_flags)
+
+    generate_stubs(hou)
+    
     sys.exit(0)
